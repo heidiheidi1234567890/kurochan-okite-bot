@@ -9,14 +9,16 @@ const fs = require('fs');
 
 dotenv.config();
 
-const app = express();
-app.use(line.middleware(config)); // こちらを先に
-app.use(bodyParser.json());
-
 const config = {
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
   channelSecret: process.env.LINE_CHANNEL_SECRET
 };
+
+const app = express();
+app.use(line.middleware(config)); // config が初期化された後に使用
+app.use(bodyParser.json());
+
+// ... (残りのコード)
 
 const client = new line.Client(config);
 
