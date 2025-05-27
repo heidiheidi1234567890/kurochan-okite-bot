@@ -54,7 +54,7 @@ function startWakeupMessages(hour = 8) {
     if (!hasResponded) {
       sendWakeupMessage();
     }
-  },  * 60 * 1000);
+  },  5 * 60 * 1000);
 
   setTimeout(() => {
     clearInterval(intervalId);
