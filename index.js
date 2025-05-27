@@ -1,15 +1,13 @@
 // LINE Wakeup Bot (Node.js) - 毎朝8時に起動、5分おきにメッセージ、1時間で終了
 
 const express = require('express');
-const bodyParser = require('body-parser');
 const line = require('@line/bot-sdk');
 const dotenv = require('dotenv');
 const schedule = require('node-schedule'); // スケジュール機能追加
 
 dotenv.config();
 
-const app = express();
-app.use(bodyParser.json());
+const app = express(); // ✅ bodyParser は使わない！
 
 const config = {
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
@@ -17,6 +15,7 @@ const config = {
 };
 
 const client = new line.Client(config);
+
 
 const targetUserId = process.env.TARGET_USER_ID;
 const notifyUserIds = process.env.NOTIFY_USER_IDS?.split(',') || [];
