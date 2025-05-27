@@ -10,6 +10,7 @@ const fs = require('fs');
 dotenv.config();
 
 const app = express();
+app.use(line.middleware(config)); // こちらを先に
 app.use(bodyParser.json());
 
 const config = {
