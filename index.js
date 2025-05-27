@@ -111,14 +111,14 @@ function handleEvent(event) {
     }
   }
 
-  if (text.startsWith('早朝:')) {
+  if (text.startsWith('変更:')) {
     const date = text.slice(3).trim();
     if (!earlyWakeupDates.includes(date)) {
       earlyWakeupDates.push(date);
       saveSchedule();
       return client.replyMessage(event.replyToken, {
         type: 'text',
-        text: `⏰ ${date} を早朝起動日に登録しました`
+        text: `⏰ ${date} の変更を登録しました`
       });
     }
   }
@@ -136,7 +136,7 @@ function handleEvent(event) {
     }
   }
 
-  if (text.startsWith('早朝削除:')) {
+  if (text.startsWith('変更削除:')) {
     const date = text.slice(5).trim();
     const index = earlyWakeupDates.indexOf(date);
     if (index !== -1) {
@@ -144,7 +144,7 @@ function handleEvent(event) {
       saveSchedule();
       return client.replyMessage(event.replyToken, {
         type: 'text',
-        text: `🗑 ${date} を早朝起動日から削除しました`
+        text: `🗑 ${date} を変更から削除しました`
       });
     }
   }
@@ -152,7 +152,7 @@ function handleEvent(event) {
   if (text === '一覧') {
     return client.replyMessage(event.replyToken, {
       type: 'text',
-      text: `📋 除外日: ${excludedDates.join(', ') || 'なし'}\n⏰ 早朝起動日: ${earlyWakeupDates.join(', ') || 'なし'}`
+      text: `📋 除外日: ${excludedDates.join(', ') || 'なし'}\n⏰ 変更日: ${earlyWakeupDates.join(', ') || 'なし'}`
     });
   }
 
