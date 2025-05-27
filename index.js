@@ -103,7 +103,7 @@ function handleEvent(event) {
     const date = text.slice(3).trim();
     if (!excludedDates.includes(date)) {
       excludedDates.push(date);
-      saveSchedule();
+      saveSchedule(); // ここで保存
       return client.replyMessage(event.replyToken, {
         type: 'text',
         text: `📅 ${date} を除外日に登録しました`
@@ -115,7 +115,7 @@ function handleEvent(event) {
     const date = text.slice(3).trim();
     if (!earlyWakeupDates.includes(date)) {
       earlyWakeupDates.push(date);
-      saveSchedule();
+      saveSchedule(); // ここで保存
       return client.replyMessage(event.replyToken, {
         type: 'text',
         text: `⏰ ${date} の変更を登録しました`
@@ -128,7 +128,7 @@ function handleEvent(event) {
     const index = excludedDates.indexOf(date);
     if (index !== -1) {
       excludedDates.splice(index, 1);
-      saveSchedule();
+      saveSchedule(); // ここで保存
       return client.replyMessage(event.replyToken, {
         type: 'text',
         text: `🗑 ${date} を除外日から削除しました`
@@ -141,7 +141,7 @@ function handleEvent(event) {
     const index = earlyWakeupDates.indexOf(date);
     if (index !== -1) {
       earlyWakeupDates.splice(index, 1);
-      saveSchedule();
+      saveSchedule(); // ここで保存
       return client.replyMessage(event.replyToken, {
         type: 'text',
         text: `🗑 ${date} を変更から削除しました`
