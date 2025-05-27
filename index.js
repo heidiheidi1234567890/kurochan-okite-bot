@@ -80,9 +80,15 @@ function sendWakeupMessage() {
 }
 
 app.post('/webhook', line.middleware(config), (req, res) => {
+  console.log('Webhookリクエストヘッダー:', req.headers); // ヘッダーを出力
+  console.log('Webhookリクエストボディ:', req.body);   // ボディも念のため出力
   Promise
     .all(req.body.events.map(handleEvent))
-    .then(() => res.status(200).end());
+    .then(() => res.status(200).end())
+    .catch((err) => {
+      console.error('Webhook処理エラー:', err);
+      res.status(500).end();
+    });
 });
 
 function handleEvent(event) {
