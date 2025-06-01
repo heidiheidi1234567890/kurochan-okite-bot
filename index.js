@@ -1,23 +1,38 @@
 // LINE Wakeup Bot (Node.js) - 毎朝8時に起動、5分おきにメッセージ、1時間で終了
 
 const express = require('express');
-const bodyParser = require('body-parser');
 const line = require('@line/bot-sdk');
 const dotenv = require('dotenv');
-const schedule = require('node-schedule');
-const fs = require('fs');
-const path = require('path');
+const getRawBody = require('raw-body'); // 追加
 
 dotenv.config();
 
 const app = express();
-app.use(bodyParser.json());
 
 const config = {
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
   channelSecret: process.env.LINE_CHANNEL_SECRET
 };
 
+// middleware 修正（raw bodyを通す）
+app.post('/webhook', (req, res, next) => {
+  getRawBody(req, {
+    length: req.headers['content-length'],
+    limit: '1mb',
+    encoding: req.charset || 'utf-8'
+  }, (err, string) => {
+    if (err) return next(err);
+    req.rawBody = string;
+    next();
+  });
+}, line.middleware(config), (req, res) => {
+  Promise.all(req.body.events.map(handleEvent))
+    .then(() => res.status(200).end())
+    .catch((err) => {
+      console.error('イベント処理エラー:', err);
+      res.status(500).end();
+    });
+});
 const client = new line.Client(config);
 
 const targetUserId = process.env.TARGET_USER_ID;
