@@ -1,14 +1,17 @@
 // LINE Wakeup Bot (Node.js) - 毎朝8時に起動、5分おきにメッセージ、1時間で終了
 
 const express = require('express');
+const bodyParser = require('body-parser');
 const line = require('@line/bot-sdk');
 const dotenv = require('dotenv');
-const fs = require('fs');
 const schedule = require('node-schedule');
+const fs = require('fs');
+const path = require('path');
 
 dotenv.config();
 
 const app = express();
+app.use(bodyParser.json());
 
 const config = {
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
@@ -23,35 +26,36 @@ const notifyUserIds = process.env.NOTIFY_USER_IDS?.split(',') || [];
 let intervalId = null;
 let hasResponded = false;
 
-// スケジュール設定の読み書き
-const SCHEDULE_FILE = 'schedule.json';
+// 除外・変更スケジュールの保存先
+const schedulePath = path.join(__dirname, 'schedule.json');
 function loadSchedule() {
   try {
-    return JSON.parse(fs.readFileSync(SCHEDULE_FILE));
-  } catch {
-    return { exclude: [], change: {} };
+    return JSON.parse(fs.readFileSync(schedulePath, 'utf8'));
+  } catch (e) {
+    return { exclude: [], override: {} };
   }
 }
-function saveSchedule(data) {
-  fs.writeFileSync(SCHEDULE_FILE, JSON.stringify(data, null, 2));
+function saveSchedule(schedule) {
+  fs.writeFileSync(schedulePath, JSON.stringify(schedule, null, 2));
 }
 
-function startWakeupMessages() {
+function startWakeupMessages(startHour = 8) {
   hasResponded = false;
   sendWakeupMessage();
   intervalId = setInterval(() => {
     if (!hasResponded) {
       sendWakeupMessage();
     }
-  }, 5 * 60 * 1000);
+  }, 5 * 60 * 1000); // 5分おき
 
+  // 開始時刻から1時間後に自動停止
   setTimeout(() => {
     clearInterval(intervalId);
     if (!hasResponded) {
       notifyUserIds.forEach(uid => {
         client.pushMessage(uid, {
           type: 'text',
-          text: `⚠️ ${targetUserId} は心地良く眠りについています…`
+          text: `⚠️ ${targetUserId} は1時間返事がありませんでした…`
         });
       });
     }
@@ -61,130 +65,111 @@ function startWakeupMessages() {
 function sendWakeupMessage() {
   client.pushMessage(targetUserId, {
     type: 'text',
-    text: 'おはよう〜！👀'
+    text: 'おはよう〜！起きてる？？👀'
   });
 }
 
-// LINE Webhook用（署名チェックあり）
 app.post('/webhook', line.middleware(config), (req, res) => {
-  Promise.all(req.body.events.map(handleEvent))
+  Promise
+    .all(req.body.events.map(handleEvent))
     .then(() => res.status(200).end())
-    .catch((err) => {
-      console.error('Webhook Error:', err);
+    .catch(err => {
+      console.error('Webhook error:', err);
       res.status(500).end();
     });
 });
-
-// 他のルート用
-app.use(express.json());
-
-app.get('/', (req, res) => res.send('LINE Wakeup Bot Running'));
 
 function handleEvent(event) {
   if (event.type !== 'message' || event.message.type !== 'text') {
     return Promise.resolve(null);
   }
 
-  const msg = event.message.text.trim();
-  const scheduleData = loadSchedule();
+  const userId = event.source.userId;
+  const text = event.message.text.trim();
+  const schedule = loadSchedule();
+  const isAdmin = notifyUserIds.includes(userId);
 
-  if (event.source.userId === targetUserId) {
+  // ① コマンド処理
+  if (isAdmin) {
+    if (text.startsWith('除外')) {
+      const dateStr = text.replace('除外', '').trim();
+      if (!schedule.exclude.includes(dateStr)) {
+        schedule.exclude.push(dateStr);
+        saveSchedule(schedule);
+      }
+      return client.replyMessage(event.replyToken, {
+        type: 'text',
+        text: `📅 ${dateStr} を除外日に追加しました！`
+      });
+    }
+
+    if (text.startsWith('変更')) {
+      const parts = text.replace('変更', '').trim().split(' ');
+      const dateStr = parts[0];
+      const hour = parseInt(parts[1]);
+      if (dateStr && hour >= 0 && hour <= 23) {
+        schedule.override[dateStr] = hour;
+        saveSchedule(schedule);
+        return client.replyMessage(event.replyToken, {
+          type: 'text',
+          text: `⏰ ${dateStr} を ${hour} 時開始に変更しました！`
+        });
+      }
+    }
+
+    if (text === '一覧') {
+      const list = [
+        '📋 除外日一覧:',
+        ...schedule.exclude.map(d => `・${d}`),
+        '',
+        '📋 変更日一覧:',
+        ...Object.entries(schedule.override).map(([d, h]) => `・${d}: ${h}時 開始`)
+      ];
+      return client.replyMessage(event.replyToken, {
+        type: 'text',
+        text: list.join('\n') || '登録はありません。'
+      });
+    }
+  }
+
+  // ② 通常の応答処理
+  if (userId === targetUserId) {
     hasResponded = true;
     clearInterval(intervalId);
     return Promise.all(notifyUserIds.map(uid =>
       client.pushMessage(uid, {
         type: 'text',
-        text: `🟢 ${targetUserId} が目覚めました！`
+        text: `🟢 ${targetUserId} が返信しました！`
       })
     ));
-  }
-
-  // 除外追加
-  if (msg.startsWith('除外:')) {
-    const date = msg.slice(3).trim();
-    if (!scheduleData.exclude.includes(date)) {
-      scheduleData.exclude.push(date);
-      saveSchedule(scheduleData);
-    }
-    return reply(event.replyToken, `🗓️ 除外日に追加しました: ${date}`);
-  }
-
-  // 除外削除
-  if (msg.startsWith('除外削除:')) {
-    const date = msg.slice(5).trim();
-    scheduleData.exclude = scheduleData.exclude.filter(d => d !== date);
-    saveSchedule(scheduleData);
-    return reply(event.replyToken, `🗑️ 除外日を削除しました: ${date}`);
-  }
-
-  // 変更追加（例：変更:2025-06-01 07:30）
-  if (msg.startsWith('変更:')) {
-    const [date, time] = msg.slice(3).trim().split(' ');
-    if (date && time) {
-      scheduleData.change[date] = time;
-      saveSchedule(scheduleData);
-      return reply(event.replyToken, `⏰ ${date} の起動時刻を ${time} に設定しました。`);
-    }
-  }
-
-  // 変更削除
-  if (msg.startsWith('変更削除:')) {
-    const date = msg.slice(5).trim();
-    delete scheduleData.change[date];
-    saveSchedule(scheduleData);
-    return reply(event.replyToken, `🗑️ 起動変更を削除しました: ${date}`);
-  }
-
-  // 一覧表示
-  if (msg === '一覧') {
-    const excludeList = scheduleData.exclude.join('\n') || '（なし）';
-    const changeList = Object.entries(scheduleData.change).map(([d, t]) => `${d} → ${t}`).join('\n') || '（なし）';
-    return reply(event.replyToken,
-      `📅 除外日一覧:\n${excludeList}\n\n⏰ 起動変更一覧:\n${changeList}`);
   }
 
   return Promise.resolve(null);
 }
 
-function reply(token, text) {
-  return client.replyMessage(token, {
-    type: 'text',
-    text
-  });
-}
+app.get('/', (req, res) => res.send('LINE Wakeup Bot Running'));
 
-// スケジュール起動（毎日）
-schedule.scheduleJob('0 0 * * *', () => { // UTC 0:00 = JST 9:00
+// 毎日スケジュール：日本時間8時 or 特別指定時間、除外日はスキップ
+schedule.scheduleJob('0 23 * * *', () => {
   const today = new Date();
-  const jst = new Date(today.getTime() + 9 * 60 * 60 * 1000);
-  const yyyyMMdd = jst.toISOString().slice(0, 10);
+  today.setHours(today.getHours() + 9); // JSTに変換
+  const ymd = today.toISOString().slice(0, 10);
+  const schedule = loadSchedule();
 
-  const scheduleData = loadSchedule();
-  if (scheduleData.exclude.includes(yyyyMMdd)) {
-    console.log(`🚫 ${yyyyMMdd} は除外日です。起動しません。`);
+  if (schedule.exclude.includes(ymd)) {
+    console.log(`🚫 ${ymd} は除外日です`);
     return;
   }
 
-  let hour = 8;
-  let minute = 0;
-  if (scheduleData.change[yyyyMMdd]) {
-    const [h, m] = scheduleData.change[yyyyMMdd].split(':').map(Number);
-    if (!isNaN(h) && !isNaN(m)) {
-      hour = h;
-      minute = m;
-    }
-  }
+  const hour = schedule.override[ymd] ?? 8;
+  const nowUTC = new Date();
+  const delayMs = ((hour - 9 + 24) % 24) * 60 * 60 * 1000; // JST→UTC
+  const runAt = new Date(nowUTC.getTime() + delayMs);
 
-  const trigger = new Date(jst);
-  trigger.setHours(hour);
-  trigger.setMinutes(minute);
-  trigger.setSeconds(0);
-
-  console.log(`🕓 Wakeup Bot will start at ${trigger.toLocaleTimeString('ja-JP')} on ${yyyyMMdd}`);
-
-  schedule.scheduleJob(trigger, () => {
-    console.log(`⏰ ${yyyyMMdd} - Wakeup Botスタート (${hour}:${minute})`);
-    startWakeupMessages();
+  console.log(`✅ ${ymd} に ${hour}時開始予定（JST）`);
+  schedule.scheduleJob(runAt, () => {
+    console.log(`⏰ ${ymd} - ${hour}時（JST）Wakeup Botスタート`);
+    startWakeupMessages(hour);
   });
 });
 
