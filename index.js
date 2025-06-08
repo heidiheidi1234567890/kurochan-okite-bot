@@ -1,18 +1,43 @@
-// LINE Wakeup Bot with Exclusion and Custom Time Support (Node.js)
+// LINE Wakeup Bot with Database Support and Enhanced Security (Node.js)
 
 const express = require('express');
 const bodyParser = require('body-parser');
 const line = require('@line/bot-sdk');
 const dotenv = require('dotenv');
-const fs = require('fs');
+const { Pool } = require('pg');
 const schedule = require('node-schedule');
 const dayjs = require('dayjs');
+const rateLimit = require('express-rate-limit');
+const helmet = require('helmet');
 
 dotenv.config();
 
 const app = express();
+
+// セキュリティミドルウェア
+app.use(helmet());
+app.use(rateLimit({
+  windowMs: 15 * 60 * 1000, // 15分
+  max: 100 // 最大100リクエスト
+}));
+
 app.use(bodyParser.json({ type: '*/*' }));
 
+// 環境変数の検証
+const requiredEnvVars = [
+  'LINE_CHANNEL_ACCESS_TOKEN',
+  'LINE_CHANNEL_SECRET',
+  'TARGET_USER_ID'
+];
+
+requiredEnvVars.forEach(varName => {
+  if (!process.env[varName]) {
+    console.error(`❌ 環境変数 ${varName} が設定されていません`);
+    process.exit(1);
+  }
+});
+
+// LINE設定
 const config = {
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
   channelSecret: process.env.LINE_CHANNEL_SECRET
@@ -20,143 +45,417 @@ const config = {
 
 const client = new line.Client(config);
 const targetUserId = process.env.TARGET_USER_ID;
-const notifyUserIds = process.env.NOTIFY_USER_IDS?.split(',') || [];
-const adminUserIds = process.env.ADMIN_USER_IDS?.split(',') || [];
+const notifyUserIds = process.env.NOTIFY_USER_IDS?.split(',').filter(id => id.trim()) || [];
+const adminUserIds = process.env.ADMIN_USER_IDS?.split(',').filter(id => id.trim()) || [];
+
+// データベース設定
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+});
 
 let intervalId = null;
 let hasResponded = false;
 let displayNameCache = {};
 
-const SCHEDULE_FILE = 'schedule.json';
-function loadSchedule() {
-  if (!fs.existsSync(SCHEDULE_FILE)) return { exclude: [], change: {} };
-  return JSON.parse(fs.readFileSync(SCHEDULE_FILE));
+// データベース初期化
+async function initializeDatabase() {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS schedule_settings (
+        id SERIAL PRIMARY KEY,
+        date VARCHAR(10) UNIQUE NOT NULL,
+        is_excluded BOOLEAN DEFAULT FALSE,
+        custom_hour INTEGER,
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS bot_logs (
+        id SERIAL PRIMARY KEY,
+        event_type VARCHAR(50) NOT NULL,
+        user_id VARCHAR(100),
+        message TEXT,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    
+    console.log('✅ データベース初期化完了');
+  } catch (error) {
+    console.error('❌ データベース初期化エラー:', error);
+    throw error;
+  }
 }
 
-function saveSchedule(schedule) {
-  fs.writeFileSync(SCHEDULE_FILE, JSON.stringify(schedule, null, 2));
+// スケジュール管理
+async function loadSchedule() {
+  try {
+    const excludeResult = await pool.query(
+      'SELECT date FROM schedule_settings WHERE is_excluded = TRUE'
+    );
+    const changeResult = await pool.query(
+      'SELECT date, custom_hour FROM schedule_settings WHERE custom_hour IS NOT NULL'
+    );
+    
+    const exclude = excludeResult.rows.map(row => row.date);
+    const change = {};
+    changeResult.rows.forEach(row => {
+      change[row.date] = row.custom_hour.toString();
+    });
+    
+    return { exclude, change };
+  } catch (error) {
+    console.error('スケジュール読み込みエラー:', error);
+    return { exclude: [], change: {} };
+  }
 }
 
-function getDisplayName(userId) {
-  if (displayNameCache[userId]) return Promise.resolve(displayNameCache[userId]);
-  return client.getProfile(userId).then(profile => {
+async function addExcludeDate(date) {
+  try {
+    await pool.query(`
+      INSERT INTO schedule_settings (date, is_excluded) 
+      VALUES ($1, TRUE) 
+      ON CONFLICT (date) 
+      DO UPDATE SET is_excluded = TRUE, updated_at = NOW()
+    `, [date]);
+  } catch (error) {
+    console.error('除外日追加エラー:', error);
+    throw error;
+  }
+}
+
+async function removeExcludeDate(date) {
+  try {
+    await pool.query(
+      'UPDATE schedule_settings SET is_excluded = FALSE, updated_at = NOW() WHERE date = $1',
+      [date]
+    );
+  } catch (error) {
+    console.error('除外日削除エラー:', error);
+    throw error;
+  }
+}
+
+async function setCustomTime(date, hour) {
+  try {
+    await pool.query(`
+      INSERT INTO schedule_settings (date, custom_hour) 
+      VALUES ($1, $2) 
+      ON CONFLICT (date) 
+      DO UPDATE SET custom_hour = $2, updated_at = NOW()
+    `, [date, parseInt(hour)]);
+  } catch (error) {
+    console.error('カスタム時間設定エラー:', error);
+    throw error;
+  }
+}
+
+// ログ記録
+async function logEvent(eventType, userId = null, message = null) {
+  try {
+    await pool.query(
+      'INSERT INTO bot_logs (event_type, user_id, message) VALUES ($1, $2, $3)',
+      [eventType, userId, message]
+    );
+  } catch (error) {
+    console.error('ログ記録エラー:', error);
+  }
+}
+
+// ユーザー名取得（キャッシュ付き）
+async function getDisplayName(userId) {
+  if (displayNameCache[userId]) {
+    return displayNameCache[userId];
+  }
+  
+  try {
+    const profile = await client.getProfile(userId);
     displayNameCache[userId] = profile.displayName;
     return profile.displayName;
-  }).catch(() => userId);
+  } catch (error) {
+    console.error('プロフィール取得エラー:', error);
+    return `User(${userId.slice(-8)})`;
+  }
 }
 
-function sendWakeupMessage() {
-  client.pushMessage(targetUserId, {
-    type: 'text',
-    text: 'おはよう〜！起きてる？？👀'
-  });
+// 起床メッセージ送信
+async function sendWakeupMessage() {
+  try {
+    await client.pushMessage(targetUserId, {
+      type: 'text',
+      text: 'おはよう〜！👀'
+    });
+    await logEvent('wakeup_sent', targetUserId);
+  } catch (error) {
+    console.error('起床メッセージ送信エラー:', error);
+    await logEvent('wakeup_error', targetUserId, error.message);
+  }
 }
 
-function startWakeupMessages(startHour) {
+// 起床メッセージ開始
+async function startWakeupMessages(startHour) {
   hasResponded = false;
-  sendWakeupMessage();
-
-  intervalId = setInterval(() => {
-    if (!hasResponded) sendWakeupMessage();
+  await sendWakeupMessage();
+  
+  // 5分間隔でリマインダー
+  intervalId = setInterval(async () => {
+    if (!hasResponded) {
+      await sendWakeupMessage();
+    }
   }, 5 * 60 * 1000);
-
-  setTimeout(() => {
+  
+  // 1時間後にタイムアウト処理
+  setTimeout(async () => {
     clearInterval(intervalId);
     if (!hasResponded) {
-      getDisplayName(targetUserId).then(name => {
-        notifyUserIds.forEach(uid => {
-          client.pushMessage(uid, {
+      try {
+        const name = await getDisplayName(targetUserId);
+        const message = `⚠️ ${name} は心地よく寝ております…`;
+        
+        for (const uid of notifyUserIds) {
+          await client.pushMessage(uid, {
             type: 'text',
-            text: `⚠️ ${name} は1時間返事がありませんでした…`
+            text: message
           });
-        });
-      });
+        }
+        
+        await logEvent('timeout_notification', targetUserId);
+      } catch (error) {
+        console.error('タイムアウト通知エラー:', error);
+      }
     }
   }, 60 * 60 * 1000);
 }
 
-function handleCommand(event) {
+// コマンド処理
+async function handleCommand(event) {
   const { text } = event.message;
   const userId = event.source.userId;
-  const schedule = loadSchedule();
-  const today = dayjs().format('YYYY-MM-DD');
-
-  if (!adminUserIds.includes(userId)) {
-    return client.replyMessage(event.replyToken, {
+  
+  try {
+    await logEvent('command_received', userId, text);
+    
+    // 管理者権限チェック
+    if (!adminUserIds.includes(userId)) {
+      await client.replyMessage(event.replyToken, {
+        type: 'text',
+        text: '申し訳ありませんが、このアカウントでは個別のお問い合わせを受け付けておりません。次の配信までお待ちください'
+      });
+      return;
+    }
+    
+    const schedule = await loadSchedule();
+    
+    // コマンド処理
+    if (text === '一覧') {
+      const excludeList = schedule.exclude.length > 0 ? schedule.exclude.join(', ') : 'なし';
+      const changeList = Object.entries(schedule.change).length > 0 
+        ? Object.entries(schedule.change).map(([d, t]) => `${d} → ${t}時`).join(', ') 
+        : 'なし';
+      
+      const listText = `📅 スケジュール設定\n\n除外日: ${excludeList}\n変更日: ${changeList}`;
+      
+      await client.replyMessage(event.replyToken, {
+        type: 'text',
+        text: listText
+      });
+      return;
+    }
+    
+    if (text.startsWith('除外 ')) {
+      const date = text.split(' ')[1];
+      if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        await client.replyMessage(event.replyToken, {
+          type: 'text',
+          text: '❌ 日付の形式が正しくありません。YYYY-MM-DD形式で入力してください。'
+        });
+        return;
+      }
+      
+      await addExcludeDate(date);
+      await client.replyMessage(event.replyToken, {
+        type: 'text',
+        text: `✅ ${date} を除外日に追加しました。`
+      });
+      return;
+    }
+    
+    if (text.startsWith('除外削除 ')) {
+      const date = text.split(' ')[1];
+      await removeExcludeDate(date);
+      await client.replyMessage(event.replyToken, {
+        type: 'text',
+        text: `✅ ${date} を除外日から削除しました。`
+      });
+      return;
+    }
+    
+    if (text.startsWith('変更 ')) {
+      const parts = text.split(' ');
+      const date = parts[1];
+      const hour = parts[2];
+      
+      if (!date || !hour || !/^\d{4}-\d{2}-\d{2}$/.test(date) || isNaN(hour) || hour < 0 || hour > 23) {
+        await client.replyMessage(event.replyToken, {
+          type: 'text',
+          text: '❌ 形式が正しくありません。例: 変更 2024-01-01 9'
+        });
+        return;
+      }
+      
+      await setCustomTime(date, hour);
+      await client.replyMessage(event.replyToken, {
+        type: 'text',
+        text: `✅ ${date} の起動時刻を ${hour} 時に変更しました。`
+      });
+      return;
+    }
+    
+    // ヘルプメッセージ
+    if (text === 'ヘルプ' || text === 'help') {
+      const helpText = `🤖 コマンド一覧\n\n` +
+        `一覧 - 現在の設定を表示\n` +
+        `除外 YYYY-MM-DD - 指定日を除外\n` +
+        `除外削除 YYYY-MM-DD - 除外日を削除\n` +
+        `変更 YYYY-MM-DD 時間 - 起動時刻を変更\n` +
+        `ヘルプ - このメッセージを表示`;
+      
+      await client.replyMessage(event.replyToken, {
+        type: 'text',
+        text: helpText
+      });
+      return;
+    }
+    
+  } catch (error) {
+    console.error('コマンド処理エラー:', error);
+    await client.replyMessage(event.replyToken, {
       type: 'text',
-      text: '申し訳ありませんが、このアカウントでは個別のお問い合わせを受け付けておりません。次の配信までお待ちください'
+      text: '❌ エラーが発生しました。しばらく後でお試しください。'
     });
   }
-
-  if (text === '一覧') {
-    const list = `除外日: ${schedule.exclude.join(', ') || 'なし'}\n変更日: ${Object.entries(schedule.change).map(([d, t]) => `${d} → ${t}時`).join(', ') || 'なし'}`;
-    return client.replyMessage(event.replyToken, { type: 'text', text: list });
-  }
-
-  if (text.startsWith('除外 ')) {
-    const date = text.split(' ')[1];
-    if (!schedule.exclude.includes(date)) {
-      schedule.exclude.push(date);
-      saveSchedule(schedule);
-    }
-    return client.replyMessage(event.replyToken, { type: 'text', text: `${date} を除外日に追加しました。` });
-  }
-
-  if (text.startsWith('除外削除 ')) {
-    const date = text.split(' ')[1];
-    schedule.exclude = schedule.exclude.filter(d => d !== date);
-    saveSchedule(schedule);
-    return client.replyMessage(event.replyToken, { type: 'text', text: `${date} を除外日から削除しました。` });
-  }
-
-  if (text.startsWith('変更 ')) {
-    const [_, date, hour] = text.split(' ');
-    schedule.change[date] = hour;
-    saveSchedule(schedule);
-    return client.replyMessage(event.replyToken, { type: 'text', text: `${date} の起動時刻を ${hour} 時に変更しました。` });
-  }
-
-  return Promise.resolve();
 }
 
-app.post('/webhook', line.middleware(config), (req, res) => {
-  Promise.all(req.body.events.map(event => {
-    if (event.type === 'message' && event.message.type === 'text') {
-      handleCommand(event);
-      if (event.source.userId === targetUserId) {
-        hasResponded = true;
-        clearInterval(intervalId);
-        return getDisplayName(targetUserId).then(name => {
-          return Promise.all(notifyUserIds.map(uid => client.pushMessage(uid, {
-            type: 'text',
-            text: `🟢 ${name} が返信しました！`
-          })));
-        });
+// Webhook処理
+app.post('/webhook', line.middleware(config), async (req, res) => {
+  try {
+    await Promise.all(req.body.events.map(async (event) => {
+      if (event.type === 'message' && event.message.type === 'text') {
+        // コマンド処理
+        await handleCommand(event);
+        
+        // ターゲットユーザーからの返信処理
+        if (event.source.userId === targetUserId) {
+          hasResponded = true;
+          clearInterval(intervalId);
+          
+          try {
+            const name = await getDisplayName(targetUserId);
+            const message = `🟢 ${name} が返信しました！`;
+            
+            await Promise.all(notifyUserIds.map(uid => 
+              client.pushMessage(uid, {
+                type: 'text',
+                text: message
+              })
+            ));
+            
+            await logEvent('user_responded', targetUserId);
+          } catch (error) {
+            console.error('返信通知エラー:', error);
+          }
+        }
       }
-    }
-    return Promise.resolve();
-  })).then(() => res.status(200).end()).catch(err => {
-    console.error('Webhook error:', err);
+    }));
+    
+    res.status(200).end();
+  } catch (error) {
+    console.error('Webhook処理エラー:', error);
+    await logEvent('webhook_error', null, error.message);
     res.status(500).end();
+  }
+});
+
+// ヘルスチェック
+app.get('/', (req, res) => {
+  res.json({
+    status: 'ok',
+    service: 'LINE Wakeup Bot',
+    timestamp: new Date().toISOString()
   });
 });
 
-app.get('/', (req, res) => res.send('LINE Wakeup Bot Running'));
-
-schedule.scheduleJob('*/1 * * *', () => {
-  const now = dayjs();
-  const schedule = loadSchedule();
-  const today = now.format('YYYY-MM-DD');
-  if (schedule.exclude.includes(today)) return;
-
-  const startHour = schedule.change[today] || '8';
-  if (now.hour() == Number(startHour) && now.minute() === 0) {
-    console.log(`⏰ ${startHour}:00 - Wakeup Botスタート`);
-    startWakeupMessages(startHour);
+app.get('/health', async (req, res) => {
+  try {
+    await pool.query('SELECT 1');
+    res.json({ status: 'healthy', database: 'connected' });
+  } catch (error) {
+    res.status(500).json({ status: 'unhealthy', database: 'disconnected' });
   }
 });
 
-const port = process.env.PORT || 3000;
-app.listen(port, () => {
-  console.log(`Server running on ${port}`);
+// スケジューラー（毎分チェック、より精密な制御）
+schedule.scheduleJob('*/1 * * * *', async () => {
+  const now = dayjs();
+  
+  try {
+    const schedule = await loadSchedule();
+    const today = now.format('YYYY-MM-DD');
+    
+    // 除外日チェック
+    if (schedule.exclude.includes(today)) {
+      return;
+    }
+    
+    // 起動時刻決定
+    const startHour = schedule.change[today] || '8';
+    
+    // 正確な時刻チェック（秒も考慮）
+    if (now.hour() === Number(startHour) && now.minute() === 0 && now.second() < 10) {
+      console.log(`⏰ ${startHour}:00 - Wakeup Botスタート (${today})`);
+      await logEvent('bot_started', null, `Start time: ${startHour}:00`);
+      await startWakeupMessages(startHour);
+    }
+  } catch (error) {
+    console.error('スケジューラーエラー:', error);
+    await logEvent('scheduler_error', null, error.message);
+  }
 });
+
+// サーバー起動
+const port = process.env.PORT || 3000;
+
+async function startServer() {
+  try {
+    await initializeDatabase();
+    
+    app.listen(port, () => {
+      console.log(`🚀 Server running on port ${port}`);
+      console.log(`📱 Target User: ${targetUserId}`);
+      console.log(`👥 Notify Users: ${notifyUserIds.length} users`);
+      console.log(`👑 Admin Users: ${adminUserIds.length} users`);
+    });
+  } catch (error) {
+    console.error('❌ サーバー起動エラー:', error);
+    process.exit(1);
+  }
+}
+
+// グレースフルシャットダウン
+process.on('SIGTERM', async () => {
+  console.log('SIGTERM受信、サーバーを終了します...');
+  clearInterval(intervalId);
+  await pool.end();
+  process.exit(0);
+});
+
+process.on('SIGINT', async () => {
+  console.log('SIGINT受信、サーバーを終了します...');
+  clearInterval(intervalId);
+  await pool.end();
+  process.exit(0);
+});
+
+startServer();
