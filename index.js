@@ -37,6 +37,19 @@ requiredEnvVars.forEach(varName => {
   }
 });
 
+// オプショナル環境変数の警告
+if (!process.env.DATABASE_URL) {
+  console.warn('⚠️ DATABASE_URL が設定されていません。メモリストレージを使用します。');
+}
+
+if (!process.env.NOTIFY_USER_IDS) {
+  console.warn('⚠️ NOTIFY_USER_IDS が設定されていません。通知機能が無効です。');
+}
+
+if (!process.env.ADMIN_USER_IDS) {
+  console.warn('⚠️ ADMIN_USER_IDS が設定されていません。管理コマンドが無効です。');
+}
+
 // LINE設定
 const config = {
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
@@ -49,10 +62,30 @@ const notifyUserIds = process.env.NOTIFY_USER_IDS?.split(',').filter(id => id.tr
 const adminUserIds = process.env.ADMIN_USER_IDS?.split(',').filter(id => id.trim()) || [];
 
 // データベース設定
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
-});
+let pool = null;
+let useDatabase = false;
+
+if (process.env.DATABASE_URL) {
+  try {
+    pool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+    });
+    useDatabase = true;
+    console.log('✅ データベース設定を検出しました');
+  } catch (error) {
+    console.warn('⚠️ データベース設定エラー、ファイルストレージにフォールバック:', error.message);
+  }
+} else {
+  console.log('ℹ️ データベース未設定、メモリストレージを使用します');
+}
+
+// メモリベースのストレージ（データベースが利用できない場合）
+let memoryStorage = {
+  excludeDates: [],
+  customTimes: {},
+  logs: []
+};
 
 let intervalId = null;
 let hasResponded = false;
@@ -60,6 +93,11 @@ let displayNameCache = {};
 
 // データベース初期化
 async function initializeDatabase() {
+  if (!useDatabase) {
+    console.log('✅ メモリストレージ初期化完了');
+    return;
+  }
+
   try {
     await pool.query(`
       CREATE TABLE IF NOT EXISTS schedule_settings (
@@ -84,13 +122,21 @@ async function initializeDatabase() {
     
     console.log('✅ データベース初期化完了');
   } catch (error) {
-    console.error('❌ データベース初期化エラー:', error);
-    throw error;
+    console.warn('⚠️ データベース初期化エラー、メモリストレージにフォールバック:', error.message);
+    useDatabase = false;
+    pool = null;
   }
 }
 
 // スケジュール管理
 async function loadSchedule() {
+  if (!useDatabase) {
+    return {
+      exclude: memoryStorage.excludeDates,
+      change: memoryStorage.customTimes
+    };
+  }
+
   try {
     const excludeResult = await pool.query(
       'SELECT date FROM schedule_settings WHERE is_excluded = TRUE'
@@ -113,6 +159,13 @@ async function loadSchedule() {
 }
 
 async function addExcludeDate(date) {
+  if (!useDatabase) {
+    if (!memoryStorage.excludeDates.includes(date)) {
+      memoryStorage.excludeDates.push(date);
+    }
+    return;
+  }
+
   try {
     await pool.query(`
       INSERT INTO schedule_settings (date, is_excluded) 
@@ -127,6 +180,11 @@ async function addExcludeDate(date) {
 }
 
 async function removeExcludeDate(date) {
+  if (!useDatabase) {
+    memoryStorage.excludeDates = memoryStorage.excludeDates.filter(d => d !== date);
+    return;
+  }
+
   try {
     await pool.query(
       'UPDATE schedule_settings SET is_excluded = FALSE, updated_at = NOW() WHERE date = $1',
@@ -139,6 +197,11 @@ async function removeExcludeDate(date) {
 }
 
 async function setCustomTime(date, hour) {
+  if (!useDatabase) {
+    memoryStorage.customTimes[date] = hour.toString();
+    return;
+  }
+
   try {
     await pool.query(`
       INSERT INTO schedule_settings (date, custom_hour) 
@@ -154,6 +217,23 @@ async function setCustomTime(date, hour) {
 
 // ログ記録
 async function logEvent(eventType, userId = null, message = null) {
+  const logEntry = {
+    timestamp: new Date().toISOString(),
+    eventType,
+    userId,
+    message
+  };
+
+  if (!useDatabase) {
+    memoryStorage.logs.push(logEntry);
+    // メモリ使用量制限のため、最新1000件のみ保持
+    if (memoryStorage.logs.length > 1000) {
+      memoryStorage.logs = memoryStorage.logs.slice(-1000);
+    }
+    console.log(`📝 [${eventType}] ${userId || 'system'}: ${message || ''}`);
+    return;
+  }
+
   try {
     await pool.query(
       'INSERT INTO bot_logs (event_type, user_id, message) VALUES ($1, $2, $3)',
@@ -161,6 +241,8 @@ async function logEvent(eventType, userId = null, message = null) {
     );
   } catch (error) {
     console.error('ログ記録エラー:', error);
+    // データベースエラーの場合、コンソールに出力
+    console.log(`📝 [${eventType}] ${userId || 'system'}: ${message || ''}`);
   }
 }
 
@@ -185,7 +267,7 @@ async function sendWakeupMessage() {
   try {
     await client.pushMessage(targetUserId, {
       type: 'text',
-      text: 'おはよう〜！👀'
+      text: 'おはよう〜！起きてる？？👀'
     });
     await logEvent('wakeup_sent', targetUserId);
   } catch (error) {
@@ -212,7 +294,7 @@ async function startWakeupMessages(startHour) {
     if (!hasResponded) {
       try {
         const name = await getDisplayName(targetUserId);
-        const message = `⚠️ ${name} は心地よく寝ております…`;
+        const message = `⚠️ ${name} は1時間返事がありませんでした…`;
         
         for (const uid of notifyUserIds) {
           await client.pushMessage(uid, {
@@ -389,10 +471,29 @@ app.get('/', (req, res) => {
 
 app.get('/health', async (req, res) => {
   try {
-    await pool.query('SELECT 1');
-    res.json({ status: 'healthy', database: 'connected' });
+    if (useDatabase) {
+      await pool.query('SELECT 1');
+      res.json({ 
+        status: 'healthy', 
+        database: 'connected',
+        storage: 'database'
+      });
+    } else {
+      res.json({ 
+        status: 'healthy', 
+        database: 'not_configured',
+        storage: 'memory',
+        excludeDates: memoryStorage.excludeDates.length,
+        customTimes: Object.keys(memoryStorage.customTimes).length,
+        logs: memoryStorage.logs.length
+      });
+    }
   } catch (error) {
-    res.status(500).json({ status: 'unhealthy', database: 'disconnected' });
+    res.status(500).json({ 
+      status: 'unhealthy', 
+      database: 'disconnected',
+      error: error.message 
+    });
   }
 });
 
@@ -433,9 +534,15 @@ async function startServer() {
     
     app.listen(port, () => {
       console.log(`🚀 Server running on port ${port}`);
+      console.log(`💾 Storage: ${useDatabase ? 'Database (PostgreSQL)' : 'Memory (temporary)'}`);
       console.log(`📱 Target User: ${targetUserId}`);
       console.log(`👥 Notify Users: ${notifyUserIds.length} users`);
       console.log(`👑 Admin Users: ${adminUserIds.length} users`);
+      
+      if (!useDatabase) {
+        console.log('⚠️  注意: メモリストレージを使用中。再起動でデータが消失します。');
+        console.log('   データベースを使用するには DATABASE_URL 環境変数を設定してください。');
+      }
     });
   } catch (error) {
     console.error('❌ サーバー起動エラー:', error);
@@ -447,14 +554,18 @@ async function startServer() {
 process.on('SIGTERM', async () => {
   console.log('SIGTERM受信、サーバーを終了します...');
   clearInterval(intervalId);
-  await pool.end();
+  if (useDatabase && pool) {
+    await pool.end();
+  }
   process.exit(0);
 });
 
 process.on('SIGINT', async () => {
   console.log('SIGINT受信、サーバーを終了します...');
   clearInterval(intervalId);
-  await pool.end();
+  if (useDatabase && pool) {
+    await pool.end();
+  }
   process.exit(0);
 });
 
