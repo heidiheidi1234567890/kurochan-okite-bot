@@ -1,15 +1,37 @@
 {
-  "name": "your-project-name",
+  "name": "line-wakeup-bot",
   "version": "1.0.0",
-  "main": "index.js",
+  "description": "LINE Wakeup Bot with Database Support",
+  "main": "server.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node server.js",
+    "dev": "nodemon server.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
   },
+  "keywords": [
+    "line",
+    "bot",
+    "wakeup",
+    "nodejs",
+    "render"
+  ],
+  "author": "",
+  "license": "MIT",
   "dependencies": {
-    "@line/bot-sdk": "^7.5.0",
+    "@line/bot-sdk": "^7.5.2",
     "express": "^4.18.2",
-    "dotenv": "^16.0.3",
+    "body-parser": "^1.20.2",
+    "dotenv": "^16.3.1",
+    "pg": "^8.11.3",
     "node-schedule": "^2.1.1",
-    "dayjs": "^1.11.9"
+    "dayjs": "^1.11.9",
+    "express-rate-limit": "^6.10.0",
+    "helmet": "^7.0.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  },
+  "engines": {
+    "node": ">=16.0.0"
   }
 }
