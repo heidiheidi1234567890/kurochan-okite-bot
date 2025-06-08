@@ -317,17 +317,24 @@ async function handleCommand(event) {
   const userId = event.source.userId;
   
   try {
+    console.log(`🎮 コマンド処理開始: "${text}" from ${userId}`);
     await logEvent('command_received', userId, text);
     
     // 管理者権限チェック
     if (!adminUserIds.includes(userId)) {
-      await client.replyMessage(event.replyToken, {
-        type: 'text',
-        text: '申し訳ありませんが、このアカウントでは個別のお問い合わせを受け付けておりません。次の配信までお待ちください'
-      });
+      console.log(`🚫 非管理者からのアクセス: ${userId}`);
+      
+      // replyTokenが存在する場合のみ返信
+      if (event.replyToken && event.replyToken !== '00000000000000000000000000000000') {
+        await client.replyMessage(event.replyToken, {
+          type: 'text',
+          text: '申し訳ありませんが、このアカウントでは個別のお問い合わせを受け付けておりません。次の配信までお待ちください'
+        });
+      }
       return;
     }
     
+    console.log(`✅ 管理者アクセス確認: ${userId}`);
     const schedule = await loadSchedule();
     
     // コマンド処理
@@ -339,38 +346,49 @@ async function handleCommand(event) {
       
       const listText = `📅 スケジュール設定\n\n除外日: ${excludeList}\n変更日: ${changeList}`;
       
-      await client.replyMessage(event.replyToken, {
-        type: 'text',
-        text: listText
-      });
+      if (event.replyToken && event.replyToken !== '00000000000000000000000000000000') {
+        await client.replyMessage(event.replyToken, {
+          type: 'text',
+          text: listText
+        });
+      }
+      console.log('📋 一覧表示完了');
       return;
     }
     
     if (text.startsWith('除外 ')) {
       const date = text.split(' ')[1];
       if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-        await client.replyMessage(event.replyToken, {
-          type: 'text',
-          text: '❌ 日付の形式が正しくありません。YYYY-MM-DD形式で入力してください。'
-        });
+        if (event.replyToken && event.replyToken !== '00000000000000000000000000000000') {
+          await client.replyMessage(event.replyToken, {
+            type: 'text',
+            text: '❌ 日付の形式が正しくありません。YYYY-MM-DD形式で入力してください。'
+          });
+        }
         return;
       }
       
       await addExcludeDate(date);
-      await client.replyMessage(event.replyToken, {
-        type: 'text',
-        text: `✅ ${date} を除外日に追加しました。`
-      });
+      if (event.replyToken && event.replyToken !== '00000000000000000000000000000000') {
+        await client.replyMessage(event.replyToken, {
+          type: 'text',
+          text: `✅ ${date} を除外日に追加しました。`
+        });
+      }
+      console.log(`📅 除外日追加: ${date}`);
       return;
     }
     
     if (text.startsWith('除外削除 ')) {
       const date = text.split(' ')[1];
       await removeExcludeDate(date);
-      await client.replyMessage(event.replyToken, {
-        type: 'text',
-        text: `✅ ${date} を除外日から削除しました。`
-      });
+      if (event.replyToken && event.replyToken !== '00000000000000000000000000000000') {
+        await client.replyMessage(event.replyToken, {
+          type: 'text',
+          text: `✅ ${date} を除外日から削除しました。`
+        });
+      }
+      console.log(`📅 除外日削除: ${date}`);
       return;
     }
     
@@ -380,18 +398,23 @@ async function handleCommand(event) {
       const hour = parts[2];
       
       if (!date || !hour || !/^\d{4}-\d{2}-\d{2}$/.test(date) || isNaN(hour) || hour < 0 || hour > 23) {
-        await client.replyMessage(event.replyToken, {
-          type: 'text',
-          text: '❌ 形式が正しくありません。例: 変更 2024-01-01 9'
-        });
+        if (event.replyToken && event.replyToken !== '00000000000000000000000000000000') {
+          await client.replyMessage(event.replyToken, {
+            type: 'text',
+            text: '❌ 形式が正しくありません。例: 変更 2024-01-01 9'
+          });
+        }
         return;
       }
       
       await setCustomTime(date, hour);
-      await client.replyMessage(event.replyToken, {
-        type: 'text',
-        text: `✅ ${date} の起動時刻を ${hour} 時に変更しました。`
-      });
+      if (event.replyToken && event.replyToken !== '00000000000000000000000000000000') {
+        await client.replyMessage(event.replyToken, {
+          type: 'text',
+          text: `✅ ${date} の起動時刻を ${hour} 時に変更しました。`
+        });
+      }
+      console.log(`⏰ 時刻変更: ${date} → ${hour}時`);
       return;
     }
     
@@ -404,59 +427,109 @@ async function handleCommand(event) {
         `変更 YYYY-MM-DD 時間 - 起動時刻を変更\n` +
         `ヘルプ - このメッセージを表示`;
       
-      await client.replyMessage(event.replyToken, {
-        type: 'text',
-        text: helpText
-      });
+      if (event.replyToken && event.replyToken !== '00000000000000000000000000000000') {
+        await client.replyMessage(event.replyToken, {
+          type: 'text',
+          text: helpText
+        });
+      }
+      console.log('❓ ヘルプ表示完了');
       return;
     }
     
+    console.log(`ℹ️ 未知のコマンド: ${text}`);
+    
   } catch (error) {
-    console.error('コマンド処理エラー:', error);
-    await client.replyMessage(event.replyToken, {
-      type: 'text',
-      text: '❌ エラーが発生しました。しばらく後でお試しください。'
-    });
+    console.error('❌ コマンド処理エラー:', error);
+    console.error('Error details:', error.stack);
+    
+    try {
+      if (event.replyToken && event.replyToken !== '00000000000000000000000000000000') {
+        await client.replyMessage(event.replyToken, {
+          type: 'text',
+          text: '❌ エラーが発生しました。しばらく後でお試しください。'
+        });
+      }
+    } catch (replyError) {
+      console.error('❌ エラー返信失敗:', replyError);
+    }
+    
+    await logEvent('command_error', userId, `${text}: ${error.message}`);
   }
 }
 
 // Webhook処理
 app.post('/webhook', line.middleware(config), async (req, res) => {
+  console.log('🔄 Webhook受信:', JSON.stringify(req.body, null, 2));
+  
   try {
+    // イベントが存在しない場合の対応
+    if (!req.body.events || req.body.events.length === 0) {
+      console.log('ℹ️ イベントなし、200で応答');
+      res.status(200).end();
+      return;
+    }
+
     await Promise.all(req.body.events.map(async (event) => {
-      if (event.type === 'message' && event.message.type === 'text') {
-        // コマンド処理
-        await handleCommand(event);
-        
-        // ターゲットユーザーからの返信処理
-        if (event.source.userId === targetUserId) {
-          hasResponded = true;
-          clearInterval(intervalId);
+      console.log(`📥 イベント処理: ${event.type}`, event);
+      
+      try {
+        if (event.type === 'message' && event.message.type === 'text') {
+          console.log(`💬 テキストメッセージ: ${event.message.text} from ${event.source.userId}`);
           
-          try {
-            const name = await getDisplayName(targetUserId);
-            const message = `🟢 ${name} が返信しました！`;
+          // コマンド処理
+          await handleCommand(event);
+          
+          // ターゲットユーザーからの返信処理
+          if (event.source.userId === targetUserId) {
+            console.log('🎯 ターゲットユーザーからの返信');
+            hasResponded = true;
+            clearInterval(intervalId);
             
-            await Promise.all(notifyUserIds.map(uid => 
-              client.pushMessage(uid, {
-                type: 'text',
-                text: message
-              })
-            ));
-            
-            await logEvent('user_responded', targetUserId);
-          } catch (error) {
-            console.error('返信通知エラー:', error);
+            try {
+              const name = await getDisplayName(targetUserId);
+              const message = `🟢 ${name} が返信しました！`;
+              
+              if (notifyUserIds.length > 0) {
+                await Promise.all(notifyUserIds.map(uid => 
+                  client.pushMessage(uid, {
+                    type: 'text',
+                    text: message
+                  })
+                ));
+                console.log(`📤 通知送信完了: ${notifyUserIds.length}人`);
+              }
+              
+              await logEvent('user_responded', targetUserId);
+            } catch (error) {
+              console.error('返信通知エラー:', error);
+              await logEvent('notification_error', targetUserId, error.message);
+            }
           }
+        } else if (event.type === 'follow') {
+          console.log('👋 新しいフォロー:', event.source.userId);
+          await logEvent('user_follow', event.source.userId);
+        } else if (event.type === 'unfollow') {
+          console.log('👋 アンフォロー:', event.source.userId);
+          await logEvent('user_unfollow', event.source.userId);
+        } else {
+          console.log(`ℹ️ 未対応イベント: ${event.type}`);
         }
+      } catch (eventError) {
+        console.error(`❌ イベント処理エラー [${event.type}]:`, eventError);
+        await logEvent('event_error', event.source?.userId, `${event.type}: ${eventError.message}`);
       }
     }));
     
+    console.log('✅ Webhook処理完了、200で応答');
     res.status(200).end();
   } catch (error) {
-    console.error('Webhook処理エラー:', error);
+    console.error('❌ Webhook処理エラー:', error);
+    console.error('Error stack:', error.stack);
     await logEvent('webhook_error', null, error.message);
-    res.status(500).end();
+    
+    // エラーでも200を返す（LINEの推奨）
+    res.status(200).end();
   }
 });
 
@@ -467,6 +540,43 @@ app.get('/', (req, res) => {
     service: 'LINE Wakeup Bot',
     timestamp: new Date().toISOString()
   });
+});
+
+// Webhook検証用エンドポイント
+app.get('/webhook', (req, res) => {
+  console.log('📞 Webhook GET request received');
+  res.status(200).send('Webhook endpoint is working');
+});
+
+// デバッグ用エンドポイント
+app.get('/debug', async (req, res) => {
+  try {
+    const schedule = await loadSchedule();
+    const debugInfo = {
+      timestamp: new Date().toISOString(),
+      server: {
+        port: port,
+        nodeEnv: process.env.NODE_ENV,
+        storage: useDatabase ? 'database' : 'memory'
+      },
+      config: {
+        targetUserId: targetUserId ? `${targetUserId.slice(0, 8)}...` : 'not_set',
+        notifyUsers: notifyUserIds.length,
+        adminUsers: adminUserIds.length,
+        hasDatabase: !!process.env.DATABASE_URL
+      },
+      schedule: schedule,
+      memory: useDatabase ? null : memoryStorage,
+      botStatus: {
+        hasResponded: hasResponded,
+        intervalActive: !!intervalId
+      }
+    };
+    
+    res.json(debugInfo);
+  } catch (error) {
+    res.status(500).json({ error: error.message, stack: error.stack });
+  }
 });
 
 app.get('/health', async (req, res) => {
